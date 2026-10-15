@@ -1,0 +1,220 @@
+import os
+import speech_recognition as sr
+import google.generativeai as genai
+import subprocess
+import pygame
+import io
+import re
+import time
+import difflib
+from gtts import gTTS
+
+# --- Configuration ---
+YOUR_GEMINI_API_KEY = "AIzaSyDCkKZVT69W2IifiaiCDVdffEHK_hWlSdw"
+CURRENT_MODEL = "gemini-3-flash-preview" 
+
+YOUR_PHONE_IP = "192.168.29.41:44545" 
+YOUR_PHONE_PASSCODE = "0532a" 
+
+# --- Coordinates (V2 Restored) ---
+WHATSAPP_SEARCH_ICON_X, WHATSAPP_SEARCH_ICON_Y = 904, 310 
+WHATSAPP_FIRST_CONTACT_X, WHATSAPP_FIRST_CONTACT_Y = 438, 574
+WHATSAPP_SEND_BUTTON_X, WHATSAPP_SEND_BUTTON_Y = 1003, 2134
+YOUTUBE_SEARCH_ICON_X, YOUTUBE_SEARCH_ICON_Y = 1014, 150
+YOUTUBE_FIRST_VIDEO_X, YOUTUBE_FIRST_VIDEO_Y = 523, 1215
+YOUTUBE_SKIP_AD_X, YOUTUBE_SKIP_AD_Y = 981, 482 
+YOUTUBE_PAUSE_CENTER_X, YOUTUBE_PAUSE_CENTER_Y = 546, 374 
+YOUTUBE_RANDOM_CLICK_X, YOUTUBE_RANDOM_CLICK_Y = 725, 444 
+YOUTUBE_FULLSCREEN_X, YOUTUBE_FULLSCREEN_Y = 1026, 651
+
+# --- NEW SKIP COORDINATES ---
+YOUTUBE_SKIP_FORWARD_X, YOUTUBE_SKIP_FORWARD_Y = 926, 377
+YOUTUBE_SKIP_BACK_X, YOUTUBE_SKIP_BACK_Y = 175, 409
+
+# --- Gemini Initialization ---
+try:
+    genai.configure(api_key=YOUR_GEMINI_API_KEY)
+    try:
+        model = genai.GenerativeModel(CURRENT_MODEL)
+        print(f"RAVIX: Successfully connected to {CURRENT_MODEL}")
+    except Exception:
+        CURRENT_MODEL = "gemini-2.5-flash"
+        model = genai.GenerativeModel(CURRENT_MODEL)
+        print(f"RAVIX: Falling back to {CURRENT_MODEL}")
+except Exception as e:
+    print(f"Gemini Config Error: {e}")
+
+def adb_command(command_str):
+    try:
+        result = subprocess.run(f"adb -s {YOUR_PHONE_IP} {command_str}", shell=True, capture_output=True, text=True)
+        return result.stdout.strip()
+    except: return None
+
+def speak(text):
+    if not text: return
+    print(f"RAVIX: {text}")
+    try:
+        if pygame.mixer.music.get_busy(): pygame.mixer.music.stop()
+        tts = gTTS(text=text, lang='en', slow=False)
+        mp3_fp = io.BytesIO()
+        tts.write_to_fp(mp3_fp); mp3_fp.seek(0)
+        pygame.mixer.music.load(mp3_fp); pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():
+            pygame.time.Clock().tick(10)
+    except Exception as e: print(f"Speech Error: {e}")
+
+def listen_for_command():
+    r = sr.Recognizer()
+    with sr.Microphone() as source:
+        print("\n[Listening...]")
+        r.adjust_for_ambient_noise(source, duration=0.5)
+        try:
+            audio = r.listen(source, timeout=5, phrase_time_limit=8)
+            return r.recognize_google(audio).lower()
+        except: return ""
+
+def handle_knowledge_query(query):
+    speak("One moment, checking my database...")
+    prompt = f"Provide a very concise, 2-3 sentence summary about: {query}."
+    try:
+        response = model.generate_content(prompt)
+        if response and response.text:
+            speak(response.text.strip())
+        else:
+            speak("I couldn't find a clear answer for that.")
+    except Exception as e:
+        print(f"Brain Error Detail: {e}")
+        speak("I am having trouble connecting to my brain. Please check your API quota.")
+
+def find_package(requested_name):
+    output = adb_command("shell pm list packages")
+    if not output: return None
+    packages = [line.replace("package:", "").strip() for line in output.splitlines()]
+    requested_name = requested_name.lower().strip()
+    clones_to_ignore = ["saver", "downloader", "clone", "tool"]
+    possible_matches = [pkg for pkg in packages if requested_name in pkg.lower() 
+                        and not any(c in pkg.lower() for c in clones_to_ignore)]
+    if possible_matches: return min(possible_matches, key=len)
+    return None
+
+def main():
+    pygame.init(); pygame.mixer.init()
+    subprocess.run(f"adb connect {YOUR_PHONE_IP}", shell=True, capture_output=True)
+    app_context = None
+    speak("RAVIX is ready.")
+
+    while True:
+        command = listen_for_command()
+        if not command: continue
+        print(f"You said: {command}")
+
+        if any(kw in command for kw in ["tell me", "who is", "what is", "where is", "how is"]):
+            handle_knowledge_query(command)
+            continue
+
+        if any(phrase in command for phrase in ["lock phone", "screen off", "turn off screen"]):
+            speak("Locking screen."); adb_command("shell input keyevent 26"); continue
+        elif "unlock" in command:
+            speak("Unlocking."); adb_command("shell input keyevent KEYCODE_WAKEUP")
+            adb_command("shell input swipe 500 1500 500 500"); time.sleep(0.5)
+            adb_command(f"shell input text {YOUR_PHONE_PASSCODE}"); adb_command("shell input keyevent KEYCODE_ENTER"); continue
+
+        if "volume" in command and "by" in command:
+            try:
+                amount = int(re.search(r'\d+', command).group())
+                steps = max(1, amount // 10)
+                direction = "up" if "up" in command else "down"
+                key_code = "24" if direction == "up" else "25"
+                speak(f"Turning volume {direction} by {amount}.")
+                for _ in range(steps):
+                    adb_command(f"shell input keyevent {key_code}")
+                    time.sleep(0.05)
+            except: speak("I couldn't catch the volume amount.")
+            continue
+
+        if app_context == "youtube_awaiting_search":
+            if "search" in command:
+                term = command.replace("search", "").strip()
+                speak(f"Searching {term}."); adb_command(f"shell input tap {YOUTUBE_SEARCH_ICON_X} {YOUTUBE_SEARCH_ICON_Y}")
+                time.sleep(1.5); adb_command(f"shell input text {term.replace(' ', '%s')}")
+                adb_command("shell input keyevent KEYCODE_ENTER"); time.sleep(3)
+                speak("Found it. Play?"); app_context = "youtube_awaiting_play"; continue
+        elif app_context == "youtube_awaiting_play":
+            if "yes" in command or "play" in command:
+                speak("Starting video."); adb_command(f"shell input tap {YOUTUBE_FIRST_VIDEO_X} {YOUTUBE_FIRST_VIDEO_Y}")
+                app_context = "youtube_playing"; continue
+
+        elif app_context == "youtube_playing":
+            # --- SYSTEMATIC VIDEO SKIPPING (NEW V2 FEATURE) ---
+            if "skip" in command and ("sec" in command or "second" in command):
+                try:
+                    seconds = int(re.search(r'\d+', command).group())
+                    taps = (seconds // 10) + 1
+                    target_x = YOUTUBE_SKIP_FORWARD_X if "back" not in command else YOUTUBE_SKIP_BACK_X
+                    target_y = YOUTUBE_SKIP_FORWARD_Y if "back" not in command else YOUTUBE_SKIP_BACK_Y
+                    
+                    speak(f"Skipping {seconds} seconds.")
+                    for _ in range(taps):
+                        adb_command(f"shell input tap {target_x} {target_y}")
+                        time.sleep(0.05)
+                    
+                    time.sleep(0.5)
+                    adb_command(f"shell input tap {YOUTUBE_RANDOM_CLICK_X} {YOUTUBE_RANDOM_CLICK_Y}")
+                except: speak("Skip failed.")
+                continue
+
+            if "skip" in command and "ad" in command:
+                speak("Skipping."); adb_command(f"shell input tap {YOUTUBE_SKIP_AD_X} {YOUTUBE_SKIP_AD_Y}"); continue
+            elif "full screen" in command:
+                speak("Going full screen."); adb_command(f"shell input tap {YOUTUBE_FULLSCREEN_X} {YOUTUBE_FULLSCREEN_Y}"); continue
+
+            elif "pause" in command or "stop" in command or "play" in command or "resume" in command:
+                speak("Toggling playback.")
+                adb_command(f"shell input tap {YOUTUBE_PAUSE_CENTER_X} {YOUTUBE_PAUSE_CENTER_Y}")
+                time.sleep(0.5)
+                adb_command(f"shell input tap {YOUTUBE_PAUSE_CENTER_X} {YOUTUBE_PAUSE_CENTER_Y}")
+                time.sleep(0.5)
+                adb_command(f"shell input tap {YOUTUBE_RANDOM_CLICK_X} {YOUTUBE_RANDOM_CLICK_Y}")
+                continue
+
+        if app_context == "whatsapp_awaiting_contact":
+            if "search" in command:
+                contact = command.replace("search", "").strip()
+                speak(f"Finding {contact}."); adb_command(f"shell input tap {WHATSAPP_SEARCH_ICON_X} {WHATSAPP_SEARCH_ICON_Y}")
+                time.sleep(2); adb_command(f"shell input text {contact.replace(' ', '%s')}")
+                time.sleep(2); adb_command(f"shell input tap {WHATSAPP_FIRST_CONTACT_X} {WHATSAPP_FIRST_CONTACT_Y}")
+                speak("Chat opened. Message?"); app_context = "whatsapp_awaiting_message"; continue
+        elif app_context == "whatsapp_awaiting_message":
+            if "send" in command:
+                msg = command.replace("send", "").strip()
+                adb_command(f"shell input text {msg.replace(' ', '%s')}")
+                time.sleep(1); adb_command(f"shell input tap {WHATSAPP_SEND_BUTTON_X} {WHATSAPP_SEND_BUTTON_Y}")
+                speak("Sent."); app_context = None; continue
+
+        if "open" in command:
+            target = command.split("open", 1)[1].strip()
+            if "whatsapp" in target:
+                speak("Opening WhatsApp."); adb_command("shell am start -n com.whatsapp/com.whatsapp.Main")
+                app_context = "whatsapp_awaiting_contact"
+            elif "youtube" in target:
+                speak("Opening YouTube."); adb_command("shell am start -n com.google.android.youtube/com.google.android.youtube.HomeActivity")
+                app_context = "youtube_awaiting_search"
+            else:
+                pkg = find_package(target)
+                if pkg: speak(f"Opening {target}."); adb_command(f"shell monkey -p {pkg} 1")
+                else: speak("App not found.")
+        elif "close" in command:
+            target = command.split("close", 1)[1].strip()
+            pkg = find_package(target)
+            if pkg:
+                speak(f"Closing {target}.")
+                adb_command(f"shell am force-stop {pkg}")
+                adb_command(f"shell am kill {pkg}")
+
+        elif "goodbye" in command or "exit" in command:
+            speak("Goodbye!"); break
+
+    pygame.quit()
+
+if __name__ == "__main__":
+    main()
